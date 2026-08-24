@@ -385,7 +385,7 @@ async def handle_all_messages(event):
 > • `ping` – Check bot ping
 > • `status` – Show status
 > • `help2`
-> •Development by @MrITACHl ````
+> •Development by @DevilWillCryBitch ````
 """
         try:
             await client.send_file(
@@ -418,7 +418,7 @@ async def handle_all_messages(event):
 • removefosh – remove fosh
 • bitch – user id to set tag them 
 • setuser – anything u want to put target username 
-> •Development by @MrITACHl ````
+> •Development by @DevilWillCryBitch ````
 """
         try:
             await client.send_file(
