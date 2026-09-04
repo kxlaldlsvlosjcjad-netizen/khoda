@@ -1149,8 +1149,7 @@ async def handle_all_messages(event):
 >spamoff - Stop spam
 >setfosh <text> - the message that u want to spam 
 > addbitch - reply on user u want to add in bitch list 
-> bitchlist - show the bitch list 
-> clearbitch - clear all of id from bitch list 
+> clearbitch confirm - clear all of id from bitch list 
 > removebitch - if u want remove just one guy u can use it 
 >speed <1-60> - Set speed
 >id - Get chat ID
@@ -1832,15 +1831,23 @@ async def _commands_handler(event, text, client):
         return
 
 
-    # CLEARBITCH - Clear all instantly
     if text.startswith("clearbitch"):
-     try:
-        count = len(TAG_TARGETS)
-        TAG_TARGETS.clear()
-        await event.reply(f"☀ Cleared all {count} bitches from the list ☀")
-     except Exception as e:
-        await event.reply(f"Error: {str(e)}")
-    return
+        try:
+            parts = text.split()
+            if len(parts) > 1 and parts[1].lower() == "confirm":
+                count = len(TAG_TARGETS)
+                TAG_TARGETS.clear()
+                await event.reply(f"☀ Cleared all {count} bitches from the list ☀")
+            else:
+                if TAG_TARGETS:
+                    await event.reply(f" This will remove {len(TAG_TARGETS)} bitches from the list.\n"
+                                     f"To confirm, send: `clearbitch confirm`\n"
+                                     f"Current bitches: {', '.join(map(str, TAG_TARGETS))}")
+                else:
+                    await event.reply(" ⋆⋆⋆ The bitch list is already empty ⋆⋆⋆")
+        except Exception as e:
+            await event.reply(f"Error: {str(e)}")
+        return
 
 
 
