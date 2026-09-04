@@ -983,8 +983,20 @@ def read_forward_file(path: str, default: str = "") -> str:
 
 async def fetch_old_messages(client):
     """Fetch historical messages from all personal dialogs and back them up."""
-    # DISABLED - Only show new messages after bot start
-    return
+    try:
+        async for dialog in client.iter_dialogs():
+            try:
+                if getattr(dialog, 'is_user', False):
+                    async for msg in client.iter_messages(dialog.entity, limit=None):
+                        try:
+                            await backup_manager.save_message(client, msg, is_outgoing=False)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0)
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[BACKUP] fetch_old_messages error: {e}")
 
 
 async def handle_all_messages(event):
@@ -993,206 +1005,179 @@ async def handle_all_messages(event):
     global TAG_TARGETS, TAG_SPAM_ACTIVE, TAG_SPAM_TASK, TAG_SPAM_DELAY, TAG_SPAM_CHAT_ID, TAG_SYMBOL
     global MASTER_CLIENT
 
-    # ===== مدیریت خطا در کل تابع =====
+    client_instance = event.client
+    # Determine sender: account for outgoing (own) messages so the bot can "see" its own messages
     try:
-        client_instance = event.client
-    except Exception as e:
-        if "Constructor ID" in str(e) or "95ef6f2b" in str(e):
-            print(f"[WARNING] Skipping malformed message: {e}")
-            return
-        else:
-            print(f"[ERROR] handle_all_messages client: {e}")
-            return
+        me = await client_instance.get_me()
+    except Exception:
+        me = None
 
-    # ===== فقط متن پیام رو بگیر =====
-    try:
-        if not event.message:
-            return
-        raw_text = event.message.text if hasattr(event.message, 'text') else ""
-        if not raw_text:
-            return
-        raw_text = raw_text.strip()
-        text = raw_text.lower()
-    except Exception as e:
-        if "Constructor ID" in str(e) or "95ef6f2b" in str(e):
-            print(f"[WARNING] Skipping malformed message (text issue): {e}")
-            return
-        else:
-            print(f"[ERROR] handle_all_messages text: {e}")
-            return
-
-    # ===== تعیین کاربر =====
-    try:
-        is_outgoing = getattr(event, 'out', False) or getattr(getattr(event, 'message', None), 'out', False)
-        if is_outgoing:
+    # Telethon marks outgoing messages with event.out or event.message.out
+    is_outgoing = getattr(event, 'out', False) or getattr(getattr(event, 'message', None), 'out', False)
+    if is_outgoing and me:
+        user_id = me.id
+    else:
+        user_id = event.sender_id
+    
+    if ENEMY_ACTIVE and REPLY_TO_ENEMY and FOSHLIST:
+        if user_id == ENEMY_TARGET:
+            reply_text = random.choice(FOSHLIST)
+            await asyncio.sleep(0.5)
             try:
-                me = await client_instance.get_me()
-                user_id = me.id if me else None
-            except:
-                user_id = None
-        else:
-            user_id = event.sender_id
-    except Exception as e:
-        print(f"[ERROR] handle_all_messages user_id: {e}")
+                await event.reply(reply_text)
+                print(f"[BOT] Enemy reply sent to {user_id}")
+            except Exception as e:
+                print(f"[ERROR] Enemy reply failed: {e}")
+            return
+    
+    if not event.message or not event.message.text:
         return
+    
+    raw_text = event.message.text.strip() if event.message.text else ""
+    text = raw_text.lower()
 
-    if not user_id:
-        return
-
-    # ===== ذخیره پیام در بکاپ =====
+    # Save incoming/outgoing message to backup
     try:
         await backup_manager.save_message(client_instance, event.message, is_outgoing=is_outgoing)
-    except Exception as e:
-        if "Constructor ID" in str(e) or "95ef6f2b" in str(e):
-            print(f"[WARNING] Skipping malformed message in save: {e}")
-        else:
-            print(f"[ERROR] save_message: {e}")
+    except Exception:
+        pass
 
-    # ===== ادامه کد اصلی =====
-    try:
-        if ENEMY_ACTIVE and REPLY_TO_ENEMY and FOSHLIST:
-            if user_id == ENEMY_TARGET:
-                reply_text = random.choice(FOSHLIST)
-                await asyncio.sleep(0.5)
-                try:
-                    await event.reply(reply_text)
-                    print(f"[BOT] Enemy reply sent to {user_id}")
-                except Exception as e:
-                    print(f"[ERROR] Enemy reply failed: {e}")
-                return
+    if text == "stopbomb":
+        if user_id not in ADMIN_IDS:
+            return
+        bomber_instance.stop()
+        await event.reply("✡ attck stop ✡ ")
+        return
 
-        if text == "stopbomb":
-            if user_id not in ADMIN_IDS:
-                return
-            bomber_instance.stop()
-            await event.reply(" attck stop ")
+    if text.startswith("bomb"):
+        if user_id not in ADMIN_IDS:
             return
 
-        if text.startswith("bomb"):
-            if user_id not in ADMIN_IDS:
-                return
-
-            parts = raw_text.split()
-            if len(parts) < 2:
-                await event.reply(
-                    " *SMS/CALL BOMBER*\n\n"
-                    "Usage: `bomb <phone>` - SMS only\n"
-                    "`bomb <phone> all` - Both SMS and Call\n"
-                    "`bomb <phone> call` - Call only\n\n"
-                    "*Example:* `bomb 9123456789 all`\n\n"
-                    "Developer by @DevilWillCryBitch",
-                    parse_mode='Markdown'
-                )
-                return
-
-            phone = parts[1].strip()
-            attack_type = "sms"
-
-            if len(parts) > 2:
-                attack_type = parts[2].lower()
-                if attack_type not in ["sms", "call", "all"]:
-                    attack_type = "sms"
-
-            if not phone.isdigit() or len(phone) != 10:
-                await event.reply(
-                    " Invalid phone number Enter without 0. Example: `9123456789` or make sure number is right ",
-                    parse_mode='Markdown'
-                )
-                return
-
+        parts = raw_text.split()
+        if len(parts) < 2:
             await event.reply(
-                f" sms attck start  `0{phone}`\n"
-                f"use stopbomb for stop it if u want ",
+                " *SMS/CALL BOMBER*\n\n"
+                "Usage: `bomb <phone>` - SMS only\n"
+                "`bomb <phone> all` - Both SMS and Call\n"
+                "`bomb <phone> call` - Call only\n\n"
+                "*Example:* `bomb 9123456789 all`\n\n"
+                "Developer by @DevilWillCryBitch",
                 parse_mode='Markdown'
             )
-
-            try:
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, bomber_instance.run_attack, phone, attack_type, 20)
-
-                message = "COMPLETE\n\n"
-                message += f" Target: `0{phone}`\n"
-                message += f" Successful: {result['success']}\n"
-                message += f" developer by @DevilWillCryBitch\n"
-
-                await event.reply(message, parse_mode='Markdown')
-            except Exception as e:
-                await event.reply(f" Error: {str(e)}")
             return
 
-        if event.is_reply and raw_text:
-            if user_id in ADMIN_IDS:
-                if not text.startswith((
-                    "help", "راهنما", "help2", "on", "off", "spam", "spamoff", "setfosh ",
-                    "speed ", "id", "setid ", "setfwd ", "setfwd_delay ", "setfwd_text ",
-                    "setfwd_pos ", "fspam_on", "fspam_off", "showfwd", "join ",
-                    "addfosh", "listfosh", "removefosh ", "setenemy", "enemyoff", "setreply ",
-                    "copy ", "back", "ping", "status", "sudo su", "kiladmin",
-                    "bitch ", "time ", "start", "stop", "stopbomb", "set "
-                )):
-                    trailing_match = re.match(r"^(.*?)(?:\s+)?(\d+)\s*$", raw_text)
-                    if trailing_match:
-                        message_text = trailing_match.group(1).strip()
-                        count = int(trailing_match.group(2))
-                        if message_text and count > 0:
-                            reply_to_id = event.message.reply_to_msg_id or event.message.id
-                            try:
-                                for _ in range(count):
-                                    await client_instance.send_message(event.chat_id, message_text, reply_to=reply_to_id)
-                                    await asyncio.sleep(0.1)
-                            except Exception as e:
-                                print(f"[ERROR] Repeat reply failed: {e}")
-                            return
+        phone = parts[1].strip()
+        attack_type = "sms"
 
-        if user_id not in ADMIN_IDS:
-            print(f"[BOT] Ignored non-admin message from {user_id}")
+        if len(parts) > 2:
+            attack_type = parts[2].lower()
+            if attack_type not in ["sms", "call", "all"]:
+                attack_type = "sms"
+
+        if not phone.isdigit() or len(phone) != 10:
+            await event.reply(
+                " Invalid phone number Enter without 0. Example: `9123456789` or make sure number is right ",
+                parse_mode='Markdown'
+            )
             return
-        
-        if event.is_private:
-            location = "PRIVATE"
-        elif event.is_group:
-            location = "GROUP"
-        elif event.is_channel:
-            location = "CHANNEL"
-        else:
-            location = "UNKNOWN"
-        
-        print(f"[BOT] Admin {user_id} in {location}: {text[:50]}")
-        
-        if text == "help" or text == "راهنما":
-            await send_loading_animation(event)
-            help_text = """
+
+        await event.reply(
+            f" sms attck start  `0{phone}`\n"
+            f"use stopbomb for stop it if u want ",
+            parse_mode='Markdown'
+        )
+
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, bomber_instance.run_attack, phone, attack_type, 20)
+
+            message = "COMPLETE\n\n"
+            message += f" Target: `0{phone}`\n"
+            message += f" Successful: {result['success']}\n"
+            message += f" developer by @DevilWillCryBitch\n"
+
+            await event.reply(message, parse_mode='Markdown')
+        except Exception as e:
+            await event.reply(f" Error: {str(e)}")
+        return
+
+    if event.is_reply and raw_text:
+        if user_id in ADMIN_IDS:
+            if not text.startswith((
+                "help", "راهنما", "help2", "on", "off", "spam", "spamoff", "setfosh ",
+                "speed ", "id", "setid ", "setfwd ", "setfwd_delay ", "setfwd_text ",
+                "setfwd_pos ", "fspam_on", "fspam_off", "showfwd", "join ",
+                "addfosh", "listfosh", "removefosh ", "setenemy", "enemyoff", "setreply ",
+                "copy ", "back", "ping", "status", "sudo su", "kiladmin",
+                "bitch ", "time ", "start", "stop", "stopbomb", "set "
+            )):
+                trailing_match = re.match(r"^(.*?)(?:\s+)?(\d+)\s*$", raw_text)
+                if trailing_match:
+                    message_text = trailing_match.group(1).strip()
+                    count = int(trailing_match.group(2))
+                    if message_text and count > 0:
+                        reply_to_id = event.message.reply_to_msg_id or event.message.id
+                        try:
+                            for _ in range(count):
+                                await client_instance.send_message(event.chat_id, message_text, reply_to=reply_to_id)
+                                await asyncio.sleep(0.1)
+                        except Exception as e:
+                            print(f"[ERROR] Repeat reply failed: {e}")
+                        return
+
+    if user_id not in ADMIN_IDS:
+        print(f"[BOT] Ignored non-admin message from {user_id}")
+        return
+    
+    if event.is_private:
+        location = "PRIVATE"
+    elif event.is_group:
+        location = "GROUP"
+    elif event.is_channel:
+        location = "CHANNEL"
+    else:
+        location = "UNKNOWN"
+    
+    print(f"[BOT] Admin {user_id} in {location}: {text[:50]}")
+    
+    
+    if text == "help" or text == "راهنما":
+        await send_loading_animation(event)
+        help_text = """
 ````𝐀𝐊𝐀𝐓𝐒𝐔𝐊𝐈
-spam - Start spam
-spamoff - Stop spam
-setfosh <text> -
-speed <1-60> - Set speed
-id - Get chat ID
-setid <chat_id> - Set target
-join <link> - Join link
-bot - Check bot
-status - Show status
-help2
+>spam - Start spam
+>spamoff - Stop spam
+>setfosh <text> - the message that u want to spam 
+> addbitch - reply on user u want to add in bitch list 
+> bitchlist - show the bitch list 
+> clearbitch - clear all of id from bitch list 
+> removebitch - if u want remove just one guy u can use it 
+>speed <1-60> - Set speed
+>id - Get chat ID
+>setid <chat_id> - Set target
+>join <link> - Join link
+>bot - Check bot
+>help2
 Development by @DevilWillCryBitch````
 """
+        try:
+            await client_instance.send_file(
+                event.chat_id,
+                HELP_IMAGE_URL,
+                caption=help_text,
+                reply_to=event.message.id,
+            )
+        except Exception as e:
+            print(f"[ERROR] Help media send failed: {e}")
             try:
-                await client_instance.send_file(
-                    event.chat_id,
-                    HELP_IMAGE_URL,
-                    caption=help_text,
-                    reply_to=event.message.id,
-                )
-            except Exception as e:
-                print(f"[ERROR] Help media send failed: {e}")
-                try:
-                    await client_instance.send_message(event.chat_id, help_text, reply_to=event.message.id)
-                except Exception as fallback_error:
-                    print(f"[ERROR] Help text fallback failed: {fallback_error}")
-            return
+                await client_instance.send_message(event.chat_id, help_text, reply_to=event.message.id)
+            except Exception as fallback_error:
+                print(f"[ERROR] Help text fallback failed: {fallback_error}")
+        return
 
-        if text == "help2":
-            await send_loading_animation(event)
-            help_text = """ 
+    if text == "help2":
+        await send_loading_animation(event)
+        help_text = """ 
 ```` 𝐀𝐊𝐀𝐓𝐒𝐔𝐊𝐈
 > sudo su <user id> - Add admin 
 > kiladmin <user id> - Remove admin
@@ -1205,325 +1190,325 @@ Development by @DevilWillCryBitch````
 > listfosh - Show the fosh list
 > addfosh - Add fosh (reply to message)
 > removefosh <index> - Remove fosh
-> bitch <user id> - Set users to tag
+> bitch <user id> - Set any usertag that u want to show up from ur target 
 > set <symbol> - Set tag symbol
 > time <seconds> - Set delay (1-60s)
 > start - spam with your chose id  
+> add bitch - reply on user u want to add in bitch list 
 > stop - Stop (start)
 > bomb <phone> - sms attck and call attck 
 > stop bomb - Stop attck
 > Development by @DevilWillCryBitch````
 """
-            try:
-                await client_instance.send_file(
-                    event.chat_id,
-                    HELP_IMAGE_URL,
-                    caption=help_text,
-                    reply_to=event.message.id,
-                )
-            except Exception as e:
-                print(f"[ERROR] Help2 media send failed: {e}")
-                try:
-                    await client_instance.send_message(event.chat_id, help_text, reply_to=event.message.id)
-                except Exception as fallback_error:
-                    print(f"[ERROR] Help2 text fallback failed: {fallback_error}")
-            return
-
-        # ON/OFF (ALL BOTS)
-        if text == "on":
-            if not ON_OFF_ACTIVE:
-                ON_OFF_ACTIVE = True
-                if ON_OFF_TASK and not ON_OFF_TASK.done():
-                    ON_OFF_TASK.cancel()
-                ON_OFF_TASK = asyncio.create_task(on_off_loop_all_bots(event.chat_id))
-                await event.reply(f"ON start {len(clients)} ")
-            return
-
-        if text == "off":
-            if ON_OFF_ACTIVE:
-                ON_OFF_ACTIVE = False
-                if ON_OFF_TASK and not ON_OFF_TASK.done():
-                    ON_OFF_TASK.cancel()
-                await event.reply("OFF stopped")
-            return
-
-        # SPEED
-        if text.startswith("speed "):
-            try:
-                new_speed = float(text[6:].strip())
-                if 1 <= new_speed <= 60:
-                    SPAM_SPEED = new_speed
-                    print(f" Spam speed changed to {SPAM_SPEED}s")
-                    await event.reply(f"Speed set to {SPAM_SPEED} seconds")
-            except ValueError:
-                pass
-            return  
-
-        # SPAM (ALL BOTS)
-        if text == "spam":
-            print(f"[DEBUG] Spam command received. SPAM_ACTIVE={SPAM_ACTIVE}")
-
-            if not SPAM_TEXT or SPAM_TEXT == "":
-                await event.reply(" No spam text set! Use: setfosh <your message>")
-                return
-
-            if not SPAM_TARGET:
-                await event.reply(" No target chat set. Use: setid <chat_id>")
-                return
-
-            if SPAM_ACTIVE:
-                await event.reply(" Spam is already running. Use spamoff to stop.")
-                return
-
-            SPAM_ACTIVE = True
-            await event.reply(
-                f" SPAM STARTED\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"{len(clients)}\n"
-                f" Target {SPAM_TARGET}\n"
-                f" Text: {SPAM_TEXT[:50]}...\n"
-                f" Speed: {SPAM_SPEED} seconds\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f" Use 'spamoff' to stop"
+        try:
+            await client_instance.send_file(
+                event.chat_id,
+                HELP_IMAGE_URL,
+                caption=help_text,
+                reply_to=event.message.id,
             )
+        except Exception as e:
+            print(f"[ERROR] Help2 media send failed: {e}")
+            try:
+                await client_instance.send_message(event.chat_id, help_text, reply_to=event.message.id)
+            except Exception as fallback_error:
+                print(f"[ERROR] Help2 text fallback failed: {fallback_error}")
+        return
 
+    # ON/OFF (ALL BOTS)
+    if text == "on":
+        if not ON_OFF_ACTIVE:
+            ON_OFF_ACTIVE = True
+            if ON_OFF_TASK and not ON_OFF_TASK.done():
+                ON_OFF_TASK.cancel()
+            ON_OFF_TASK = asyncio.create_task(on_off_loop_all_bots(event.chat_id))
+            await event.reply(f"ON start {len(clients)} ")
+        return
+
+    if text == "off":
+        if ON_OFF_ACTIVE:
+            ON_OFF_ACTIVE = False
+            if ON_OFF_TASK and not ON_OFF_TASK.done():
+                ON_OFF_TASK.cancel()
+            await event.reply("OFF stopped")
+        return
+
+    # SPEED
+    if text.startswith("speed "):
+        try:
+            new_speed = float(text[6:].strip())
+            if 1 <= new_speed <= 60:
+                SPAM_SPEED = new_speed
+                print(f" ⧽ Spam speed changed to {SPAM_SPEED}s")
+                await event.reply(f"Speed set to {SPAM_SPEED} seconds")
+        except ValueError:
+            pass
+        return  
+
+    # SPAM (ALL BOTS)
+    if text == "spam":
+        print(f"[DEBUG] Spam run ☮ {SPAM_ACTIVE}")
+
+        # Check if SPAM_TEXT is set
+        if not SPAM_TEXT or SPAM_TEXT == "":
+            await event.reply("愛 No spam text set! Use: setfosh <your message> 愛")
+            return
+
+        if not SPAM_TARGET:
+            await event.reply("╰┈➤ No target chat set. Use: setid <chat_id> ")
+            return
+
+        if SPAM_ACTIVE:
+            await event.reply("☘ Spam is already running. Use spamoff to stop ☘")
+            return
+
+        SPAM_ACTIVE = True
+        await event.reply(
+            f" SPAM STARTED\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"{len(clients)}\n"
+            f" ☘ Target {SPAM_TARGET}\n"
+            f" ☘  Text: {SPAM_TEXT[:50]}...\n"
+            f" ☘   Speed: {SPAM_SPEED} seconds\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f" Use 'spamoff' to stop ♱"
+        )
+
+        if SPAM_TASK and not SPAM_TASK.done():
+            SPAM_TASK.cancel()
+        SPAM_TASK = asyncio.create_task(spam_loop_all_bots(SPAM_TARGET, SPAM_TEXT, SPAM_SPEED))
+        return
+
+    if text == "spamoff":
+        print(f"[DEBUG] spamoff received. SPAM_ACTIVE={SPAM_ACTIVE}")
+        if SPAM_ACTIVE:
+            SPAM_ACTIVE = False
             if SPAM_TASK and not SPAM_TASK.done():
                 SPAM_TASK.cancel()
-            SPAM_TASK = asyncio.create_task(spam_loop_all_bots(SPAM_TARGET, SPAM_TEXT, SPAM_SPEED))
-            return
+                print("[DEBUG] Spam task cancelled")
+            await event.reply("˗ˏˋ ✞ ˎˊ˗ SPAM STOPPED ˗ˏˋ ✞ ˎˊ˗")
+        else:
+            await event.reply(" Spam is not active")
+        return
 
-        if text == "spamoff":
-            print(f"[DEBUG] spamoff received. SPAM_ACTIVE={SPAM_ACTIVE}")
-            if SPAM_ACTIVE:
-                SPAM_ACTIVE = False
-                if SPAM_TASK and not SPAM_TASK.done():
-                    SPAM_TASK.cancel()
-                    print("[DEBUG] Spam task cancelled")
-                await event.reply(" SPAM STOPPED")
-            else:
-                await event.reply(" Spam is not active")
-            return
+    # SETFOSH
+    if text.startswith("setfosh "):
+        SPAM_TEXT = text[8:].strip()
+        await event.reply(f"Spam text set to: {SPAM_TEXT}")
+        return
 
-        # SETFOSH
-        if text.startswith("setfosh "):
-            SPAM_TEXT = text[8:].strip()
-            await event.reply(f"Spam text set to: {SPAM_TEXT}")
-            return
+    # ID
+    if text == "id":
+        chat_id = event.chat_id
+        chat_type = "† Private †" if event.is_private else "† Group †" if event.is_group else "† Channel †"
+        await event.reply(f"ID {chat_id}\nType: {chat_type}")
+        return
 
-        # ID
-        if text == "id":
-            chat_id = event.chat_id
-            chat_type = "Private" if event.is_private else "Group" if event.is_group else "Channel"
-            await event.reply(f"ID {chat_id}\nType: {chat_type}")
-            return
-
-        # SETID
-        if text.startswith("setid "):
+    # SETID
+    if text.startswith("setid "):
+        try:
+            SPAM_TARGET = int(text[6:].strip())
+            await event.reply(f"† Target set to {SPAM_TARGET}")
             try:
-                SPAM_TARGET = int(text[6:].strip())
-                await event.reply(f"Target set to {SPAM_TARGET}")
-                try:
-                    with open(TARGET_ID_FILE, "w", encoding="utf-8") as f:
-                        f.write(str(SPAM_TARGET))
-                except Exception as e:
-                    print(f"[ERROR] Could not save target ID file: {e}")
-            except ValueError:
-                await event.reply("Invalid chat ID. Must be a number.")
-            return
-
-        # SETFWD
-        if text.startswith("setfwd "):
-            link = text[7:].strip()
-            if not link:
-                await event.reply("Usage: setfwd <message_link>")
-                return
-            try:
-                cleaned = link.replace("https://", "").replace("http://", "").replace("t.me/", "").replace("telegram.me/", "")
-                parts = cleaned.split("/")
-                if len(parts) >= 3 and parts[0].lower() == "c":
-                    channel = str(int("-100" + parts[1]))
-                    msg_id = int(parts[2])
-                elif len(parts) >= 2:
-                    channel = parts[0]
-                    msg_id = int(parts[1])
-                else:
-                    await event.reply("Invalid setfwd link. Use a t.me link with message ID.")
-                    return
-                with open(FWD_SOURCE_CHANNEL_FILE, "w", encoding="utf-8") as f:
-                    f.write(channel)
-                with open(FWD_SOURCE_MSG_ID_FILE, "w", encoding="utf-8") as f:
-                    f.write(str(msg_id))
-                await event.reply(f"Source set\nChannel: {channel}\nMessage ID: {msg_id}")
+                with open(TARGET_ID_FILE, "w", encoding="utf-8") as f:
+                    f.write(str(SPAM_TARGET))
             except Exception as e:
-                await event.reply(f"Failed to parse link: {e}")
-            return
+                print(f"[ERROR] Could not save target ID file: {e}")
+        except ValueError:
+            await event.reply("Invalid chat ID. Must be a number.")
+        return
 
-        # SETFWD_DELAY
-        if text.startswith("setfwd_delay "):
-            try:
-                parts = text.split()
-                min_d = float(parts[1])
-                max_d = float(parts[2]) if len(parts) > 2 else min_d + 1
-                if min_d < 0.5:
-                    min_d = 0.5
-                if max_d < min_d:
-                    max_d = min_d + 1
-                with open(FWD_DELAY_MIN_FILE, "w", encoding="utf-8") as f:
-                    f.write(str(min_d))
-                with open(FWD_DELAY_MAX_FILE, "w", encoding="utf-8") as f:
-                    f.write(str(max_d))
-                await event.reply(f"Delay: {min_d}-{max_d} seconds")
-            except Exception:
-                await event.reply("Usage: setfwd_delay <min> <max>")
+    # SETFWD
+    if text.startswith("setfwd "):
+        link = text[7:].strip()
+        if not link:
+            await event.reply("Usage: setfwd <message_link>")
             return
-
-        # SETFWD_TEXT
-        if text.startswith("setfwd_text "):
-            extra_text = text[12:].strip()
-            with open(FWD_EXTRA_TEXT_FILE, "w", encoding="utf-8") as f:
-                f.write(extra_text)
-            await event.reply("Extra text set")
-            return
-
-        # SETFWD_POS
-        if text.startswith("setfwd_pos "):
-            pos = text[11:].strip().lower()
-            if pos not in ["before", "after"]:
-                await event.reply("Usage: setfwd_pos before or setfwd_pos after")
+        try:
+            cleaned = link.replace("https://", "").replace("http://", "").replace("t.me/", "").replace("telegram.me/", "")
+            parts = cleaned.split("/")
+            if len(parts) >= 3 and parts[0].lower() == "c":
+                channel = str(int("-100" + parts[1]))
+                msg_id = int(parts[2])
+            elif len(parts) >= 2:
+                channel = parts[0]
+                msg_id = int(parts[1])
+            else:
+                await event.reply("Invalid setfwd link. Use a t.me link with message ID.")
                 return
-            with open(FWD_EXTRA_POSITION_FILE, "w", encoding="utf-8") as f:
-                f.write(pos)
-            await event.reply(f"Position: {pos}")
-            return
+            with open(FWD_SOURCE_CHANNEL_FILE, "w", encoding="utf-8") as f:
+                f.write(channel)
+            with open(FWD_SOURCE_MSG_ID_FILE, "w", encoding="utf-8") as f:
+                f.write(str(msg_id))
+            await event.reply(f"Source set\nChannel: {channel}\nMessage ID: {msg_id}")
+        except Exception as e:
+            await event.reply(f"Failed to parse link: {e}")
+        return
 
-        # FSPAM (ALL BOTS)
-        if text == "fspam_on":
-            if FORWARD_SPAM_ACTIVE:
-                await event.reply("Forward spam is already running.")
-                return
-            FORWARD_SPAM_ACTIVE = True
+    # SETFWD_DELAY
+    if text.startswith("setfwd_delay "):
+        try:
+            parts = text.split()
+            min_d = float(parts[1])
+            max_d = float(parts[2]) if len(parts) > 2 else min_d + 1
+            if min_d < 0.5:
+                min_d = 0.5
+            if max_d < min_d:
+                max_d = min_d + 1
+            with open(FWD_DELAY_MIN_FILE, "w", encoding="utf-8") as f:
+                f.write(str(min_d))
+            with open(FWD_DELAY_MAX_FILE, "w", encoding="utf-8") as f:
+                f.write(str(max_d))
+            await event.reply(f"Delay: {min_d}-{max_d} seconds")
+        except Exception:
+            await event.reply("Usage: setfwd_delay <min> <max>")
+        return
+
+    # SETFWD_TEXT
+    if text.startswith("setfwd_text "):
+        extra_text = text[12:].strip()
+        with open(FWD_EXTRA_TEXT_FILE, "w", encoding="utf-8") as f:
+            f.write(extra_text)
+        await event.reply("Extra text set")
+        return
+
+    # SETFWD_POS
+    if text.startswith("setfwd_pos "):
+        pos = text[11:].strip().lower()
+        if pos not in ["before", "after"]:
+            await event.reply("Usage: setfwd_pos before or setfwd_pos after")
+            return
+        with open(FWD_EXTRA_POSITION_FILE, "w", encoding="utf-8") as f:
+            f.write(pos)
+        await event.reply(f"Position: {pos}")
+        return
+
+    # FSPAM (ALL BOTS)
+    if text == "fspam_on":
+        if FORWARD_SPAM_ACTIVE:
+            await event.reply("Forward spam is already running.")
+            return
+        FORWARD_SPAM_ACTIVE = True
+        if FORWARD_SPAM_TASK and not FORWARD_SPAM_TASK.done():
+            FORWARD_SPAM_TASK.cancel()
+        FORWARD_SPAM_TASK = asyncio.create_task(forward_spam_all_bots())
+        await event.reply(f"FWD SPAM RUNNING with ALL {len(clients)} bots")
+        return
+
+    if text == "fspam_off":
+        if FORWARD_SPAM_ACTIVE:
+            FORWARD_SPAM_ACTIVE = False
             if FORWARD_SPAM_TASK and not FORWARD_SPAM_TASK.done():
                 FORWARD_SPAM_TASK.cancel()
-            FORWARD_SPAM_TASK = asyncio.create_task(forward_spam_all_bots())
-            await event.reply(f"FWD SPAM RUNNING with ALL {len(clients)} bots")
-            return
-
-        if text == "fspam_off":
-            if FORWARD_SPAM_ACTIVE:
-                FORWARD_SPAM_ACTIVE = False
-                if FORWARD_SPAM_TASK and not FORWARD_SPAM_TASK.done():
-                    FORWARD_SPAM_TASK.cancel()
-                await event.reply("FWD SPAM STOPPED")
-            else:
-                await event.reply("Forward spam is not running.")
-            return
-
-        # SHOWFWD
-        if text == "showfwd":
-            source = read_forward_file(FWD_SOURCE_CHANNEL_FILE)
-            msg_id = read_forward_file(FWD_SOURCE_MSG_ID_FILE, "0")
-            min_delay = read_forward_file(FWD_DELAY_MIN_FILE, "3")
-            max_delay = read_forward_file(FWD_DELAY_MAX_FILE, "10")
-            target = SPAM_TARGET or int(read_forward_file(TARGET_ID_FILE, "1") or "1")
-            status = "RUNNING" if FORWARD_SPAM_ACTIVE else "STOPPED"
-            await event.reply(f"Forward Config - {status}\nTARGET: {target}\nSOURCE: {source}/{msg_id}\nDELAY: {min_delay}-{max_delay} seconds")
-            return
-
-        # JOIN (ALL BOTS)
-        if text.startswith("join "):
-            invite_input = raw_text[5:].strip()
-            if not invite_input:
-                await event.reply("Usage: join <invite_link> or join @channelname")
-                return
-
-            if MASTER_CLIENT is None:
-                await event.reply(" Master client not initialized!")
-                return
-
-            invite_input = invite_input.strip()
-            is_private = False
-            target = invite_input
-            
-            if "joinchat/" in invite_input:
-                target = invite_input.split("joinchat/")[-1].split("?")[0].strip("/")
-                is_private = True
-            elif invite_input.startswith("+"):
-                target = invite_input.strip()
-                is_private = True
-            elif "t.me/+" in invite_input:
-                target = invite_input.split("t.me/+")[-1].split("?")[0].strip("/")
-                is_private = True
-            else:
-                target = normalize_join_target(invite_input)
-                if not target:
-                    await event.reply("Invalid invite link.")
-                    return
-
-            try:
-                entity = None
-                
-                if is_private:
-                    try:
-                        await event.reply(" Joining")
-                        result = await MASTER_CLIENT(ImportChatInviteRequest(target))
-                        if result and hasattr(result, 'chats') and result.chats:
-                            entity = result.chats[0]
-                            await event.reply(f" Private invite accepted! Chat: {getattr(entity, 'title', 'Unknown')}")
-                        else:
-                            await event.reply("it join")
-                            return
-                    except Exception as e:
-                        error_msg = str(e)
-                        if "already" in error_msg.lower():
-                            await event.reply(" Already a member of this chat")
-                            return
-                        await event.reply(f" Failed to join private invite: {error_msg[:100]}")
-                        return
-                else:
-                    try:
-                        await event.reply(" Finding public channel...")
-                        entity = await MASTER_CLIENT.get_entity(target)
-                    except Exception as e:
-                        await event.reply(f" Could not find channel: {str(e)[:100]}")
-                        return
-
-                if not entity:
-                    await event.reply("Could not find the channel/group.")
-                    return
-
-                joined_count = 0
-                for i, client in enumerate(clients):
-                    try:
-                        if is_private:
-                            await client(ImportChatInviteRequest(target))
-                        else:
-                            await client(JoinChannelRequest(entity))
-                        joined_count += 1
-                        print(f"[JOIN] Client {i} joined {invite_input}")
-                        await asyncio.sleep(0.5)
-                    except UserAlreadyParticipantError:
-                        joined_count += 1
-                        print(f"[JOIN] Client {i} already joined")
-                    except FloodWaitError as e:
-                        print(f"[JOIN] Client {i} flood wait: {e.seconds}s")
-                        await asyncio.sleep(e.seconds)
-                    except Exception as e:
-                        print(f"[JOIN] Client {i} error: {e}")
-
-                await event.reply(f" {joined_count}/{len(clients)} clients joined successfully")
-            except Exception as e:
-                await event.reply(f" Failed to join: {str(e)[:200]}")
-            return
-
-        # ADDFOSH - moved to commands handler
-        await _commands_handler(event, text, client_instance)
-
-    except Exception as e:
-        if "Constructor ID" in str(e) or "95ef6f2b" in str(e):
-            print(f"[WARNING] Skipping malformed message in handler: {e}")
+            await event.reply("FWD SPAM STOPPED")
         else:
-            print(f"[ERROR] handle_all_messages: {e}")
+            await event.reply("Forward spam is not running.")
         return
+
+    # SHOWFWD
+    if text == "showfwd":
+        source = read_forward_file(FWD_SOURCE_CHANNEL_FILE)
+        msg_id = read_forward_file(FWD_SOURCE_MSG_ID_FILE, "0")
+        min_delay = read_forward_file(FWD_DELAY_MIN_FILE, "3")
+        max_delay = read_forward_file(FWD_DELAY_MAX_FILE, "10")
+        target = SPAM_TARGET or int(read_forward_file(TARGET_ID_FILE, "1") or "1")
+        status = "RUNNING" if FORWARD_SPAM_ACTIVE else "STOPPED"
+        await event.reply(f"Forward Config - {status}\nTARGET: {target}\nSOURCE: {source}/{msg_id}\nDELAY: {min_delay}-{max_delay} seconds")
+        return
+
+    # JOIN (ALL BOTS) - FIXED
+    if text.startswith("join "):
+        invite_input = raw_text[5:].strip()
+        if not invite_input:
+            await event.reply("Usage: join <invite_link> or join @channelname")
+            return
+
+        if MASTER_CLIENT is None:
+            await event.reply(" Master client not initialized!")
+            return
+
+        # Clean the input
+        invite_input = invite_input.strip()
+        
+        # Check if it's a private invite (starts with + or contains joinchat)
+        is_private = False
+        target = invite_input
+        
+        # Extract hash from various invite formats
+        if "joinchat/" in invite_input:
+            target = invite_input.split("joinchat/")[-1].split("?")[0].strip("/")
+            is_private = True
+        elif invite_input.startswith("+"):
+            target = invite_input.strip()
+            is_private = True
+        elif "t.me/+" in invite_input:
+            target = invite_input.split("t.me/+")[-1].split("?")[0].strip("/")
+            is_private = True
+        else:
+            target = normalize_join_target(invite_input)
+            if not target:
+                await event.reply("Invalid invite link.")
+                return
+
+        try:
+            entity = None
+            
+            if is_private:
+                try:
+                    await event.reply("──── Loading ────")
+                    result = await MASTER_CLIENT(ImportChatInviteRequest(target))
+                    if result and hasattr(result, 'chats') and result.chats:
+                        entity = result.chats[0]
+                        await event.reply(f" Private invite accepted! Chat: {getattr(entity, 'title', 'Unknown')}")
+                    else:
+                        await event.reply("──── it join ────")
+                        return
+                except Exception as e:
+                    error_msg = str(e)
+                    if "already" in error_msg.lower():
+                        await event.reply(" Already a member of this chat")
+                        return
+                    await event.reply(f" Failed to join private invite: {error_msg[:100]}")
+                    return
+            else:
+                try:
+                    await event.reply(" Finding public channel...")
+                    entity = await MASTER_CLIENT.get_entity(target)
+                except Exception as e:
+                    await event.reply(f" Could not find channel: {str(e)[:100]}")
+                    return
+
+            if not entity:
+                await event.reply("Could not find the channel/group.")
+                return
+
+            # Join with all clients
+            joined_count = 0
+            for i, client in enumerate(clients):
+                try:
+                    if is_private:
+                        await client(ImportChatInviteRequest(target))
+                    else:
+                        await client(JoinChannelRequest(entity))
+                    joined_count += 1
+                    print(f"[JOIN] Client {i} joined {invite_input}")
+                    await asyncio.sleep(0.5)
+                except UserAlreadyParticipantError:
+                    joined_count += 1
+                    print(f"[JOIN] Client {i} already joined")
+                except FloodWaitError as e:
+                    print(f"[JOIN] Client {i} flood wait: {e.seconds}s")
+                    await asyncio.sleep(e.seconds)
+                except Exception as e:
+                    print(f"[JOIN] Client {i} error: {e}")
+
+            await event.reply(f" {joined_count}/{len(clients)} clients joined successfully")
+        except Exception as e:
+            await event.reply(f" Failed to join: {str(e)[:200]}")
+        return
+
+    # ADDFOSH - moved to commands handler
+    await _commands_handler(event, text, client_instance)
 
 try:
     with open(FOSH_FILE, "r", encoding="utf-8") as f:
@@ -1605,8 +1590,8 @@ async def _commands_handler(event, text, client):
         ENEMY_TARGET = target_user.id
         ENEMY_ACTIVE = True
         await event.reply(
-            f"Enemy set: @{target_user.username or target_user.first_name or 'Unknown'}\n"
-            f"ID: {ENEMY_TARGET}"
+            f"╋━ Enemy set: @{target_user.username or target_user.first_name or 'Unknown'}\n"
+            f"╋━ ID: {ENEMY_TARGET}"
         )
         return
 
@@ -1614,9 +1599,9 @@ async def _commands_handler(event, text, client):
     if text == "enemyoff":
         if ENEMY_ACTIVE:
             ENEMY_ACTIVE = False
-            await event.reply("Enemy mode deactivated.")
+            await event.reply("⍀ Enemy mode off ⍀")
         else:
-            await event.reply("Enemy mode is already off.")
+            await event.reply("⍀ Enemy mode is already off ⍀")
         return
 
     # SETREPLY
@@ -1635,7 +1620,7 @@ async def _commands_handler(event, text, client):
         if target_identifier.startswith("@"):
             target_identifier = target_identifier[1:]
         
-        await event.reply(f"Searching for user: {target_identifier}...")
+        await event.reply(f"Searching for user {target_identifier}...")
         
         try:
             try:
@@ -1746,31 +1731,131 @@ async def _commands_handler(event, text, client):
             if len(parts) < 2:
                 await event.reply("Provide at least one User ID.\nUsage: bitch user_id1 user_id2 ...")
                 return
-            
+
             user_ids = []
             invalid_ids = []
-            
+
             for part in parts[1:]:
                 try:
                     user_id = int(part.strip())
                     user_ids.append(user_id)
                 except ValueError:
                     invalid_ids.append(part)
-            
+
             if invalid_ids:
                 await event.reply(f"Invalid user IDs: {', '.join(invalid_ids)}")
                 return
-            
+
             if not user_ids:
                 await event.reply("No valid User IDs provided.")
                 return
-            
+
             TAG_TARGETS = user_ids
             await event.reply(f"{len(TAG_TARGETS)} \nIDs: {'`, `'.join(map(str, TAG_TARGETS))}")
-            
+
         except Exception as e:
             await event.reply(f"Error: {str(e)}")
         return
+
+    # New command: addbitch - works with reply
+    if text.startswith("addbitch"):
+        try:
+            # Check if the message is a reply
+            if not event.is_reply:
+                await event.reply("Reply to a user's message to add them\nUsage Reply to a message and send 'addbitch'")
+                return
+
+            # Get the replied message
+            replied_msg = await event.get_reply_message()
+            if not replied_msg:
+                await event.reply("i cant see reply u stupid bitch")
+                return
+
+            # Get the sender ID from the replied message
+            sender_id = replied_msg.sender_id
+
+            # Check if sender_id is valid
+            if not sender_id:
+                await event.reply("Could not get user ID from the replied message.")
+                return
+
+            # Add the ID to the TAG_TARGETS list
+            try:
+                TAG_TARGETS.append(sender_id)
+            except Exception:
+                TAG_TARGETS = [sender_id]
+
+            await event.reply(f"⍀ user ID {sender_id} to the bitch list")
+
+        except Exception as e:
+            await event.reply(f"Error: {str(e)}")
+        return
+
+    # LISTBITCH - show current TAG_TARGETS
+    if text.startswith("listbitch"):
+        if TAG_TARGETS:
+            await event.reply(f"╋ Bitch List ({len(TAG_TARGETS)}):\n{', '.join(map(str, TAG_TARGETS))}")
+        else:
+            await event.reply("✚ The bitch list is empty ✚")
+        return
+
+    # REMOVEBITCH - remove by ID or by reply
+    if text.startswith("removebitch"):
+        try:
+            parts = text.split()
+            # If used as reply without args, remove replied user
+            if event.is_reply and len(parts) == 1:
+                replied = await event.get_reply_message()
+                if replied and replied.sender_id:
+                    rid = replied.sender_id
+                else:
+                    await event.reply("Could not get user from reply")
+                    return
+            elif len(parts) >= 2:
+                try:
+                    rid = int(parts[1])
+                except ValueError:
+                    await event.reply("Provide a valid numeric user ID or reply to a message")
+                    return
+            else:
+                await event.reply("Usage: removebitch <user_id> or reply and send removebitch")
+                return
+
+            if rid in TAG_TARGETS:
+                TAG_TARGETS.remove(rid)
+                await event.reply(f"⚚ Removed user ID {rid} from bitch list ⚚")
+                
+            else:
+                await event.reply(f"User ID {rid} not in bitch list✘")
+        except Exception as e:
+            await event.reply(f"Error: {e}")
+        return
+
+
+    elif text.startswith("clearbitch"):
+        try:
+            parts = text.split()
+            if len(parts) > 1 and parts[1].lower() == "confirm":
+                count = len(BITCH_LIST)
+                BITCH_LIST.clear()
+                await event.reply(f"☀ Cleared all {count} bitches from the list ☀")
+            else:
+                if BITCH_LIST:
+                    await event.reply(f" This will remove {len(BITCH_LIST)} bitches from the list.\n"
+                                     f"To confirm, send: `clearbitch confirm`\n"
+                                     f"Current bitches: {', '.join(map(str, BITCH_LIST))}")
+                else:
+                    await event.reply(" ⋆⋆⋆ The bitch list is already empty ⋆⋆⋆")
+                    
+        except Exception as e:
+            await event.reply(f"Error: {str(e)}")
+        return
+
+
+
+
+
+
 
     # TIME (set tag delay)
     if text.startswith("time "):
@@ -1780,21 +1865,21 @@ async def _commands_handler(event, text, client):
                 TAG_SPAM_DELAY = delay
                 await event.reply(f"{TAG_SPAM_DELAY} seconds.")
             else:
-                await event.reply("Delay must be between 1 and 60 seconds.")
+                await event.reply("Delay must be between 1 and 60 seconds ❤︎")
         except ValueError:
-            await event.reply("Invalid number. Use time <seconds> (1-60).")
+            await event.reply("☀ Invalid number. Use time <seconds> (1-60) ☀")
         return
 
     # START (tag spam with ALL bots)
     if text == "start":
         if TAG_SPAM_ACTIVE:
-            await event.reply("Tag spam is already running. Use stop first")
+            await event.reply("☀ spam is already running. Use stop first ☀")
             return
         if not FOSHLIST:
             await event.reply("No fosh messages available. Use addfosh first")
             return
         if not TAG_TARGETS:
-            await event.reply("No tag targets set. Use bitch <ids> first")
+            await event.reply(" ಄ No tag targets set. Use bitch <ids> or reply on them and type addbitch ಄")
             return
         
         TAG_SPAM_CHAT_ID = event.chat_id
@@ -1814,7 +1899,7 @@ async def _commands_handler(event, text, client):
     # STOP (tag spam)
     if text == "stop":
         if not TAG_SPAM_ACTIVE:
-            await event.reply("Tag spam is not running.")
+            await event.reply("ok")
             return
         TAG_SPAM_ACTIVE = False
         if TAG_SPAM_TASK and not TAG_SPAM_TASK.done():
@@ -1829,12 +1914,12 @@ async def _commands_handler(event, text, client):
             await event.reply("Please provide a symbol.\nUsage: set <symbol>")
             return
         TAG_SYMBOL = symbol
-        await event.reply(f"Tag symbol set to: {TAG_SYMBOL}")
+        await event.reply(f"♀ symbol set to: {TAG_SYMBOL}")
         return
 
     # PING
     if text == "bot":
-        await event.reply("O N L I N E")
+        await event.reply(" 𝄃𝄃𝄂𝄂𝄀𝄁𝄃𝄂𝄂𝄃 O N L I N E 𝄃𝄃𝄂𝄂𝄀𝄁𝄃𝄂𝄂𝄃")
         return
     
     # STATUS
@@ -1924,30 +2009,17 @@ async def run_user(index, phone):
     print(f"[USER {index}] User ID: {me.id}")
     
     client.add_event_handler(handle_all_messages, events.NewMessage())
-    # DISABLED - Don't fetch old messages to avoid Constructor ID errors
-    # try:
-    #     asyncio.create_task(fetch_old_messages(client))
-    # except Exception:
-    #     pass
+    # start background task to fetch old PMs for this client
+    try:
+        asyncio.create_task(fetch_old_messages(client))
+    except Exception:
+        pass
     
     await client.run_until_disconnected()
 
 
 async def main():
     global ALL_BOTS_RUNNING
-    
-    # Clear old backup file on startup
-    try:
-        with open(BACKUP_FILE, 'w', encoding='utf-8') as f:
-            f.write('')
-        print("[BOT] Old backup file cleared")
-    except:
-        pass
-    
-    # Clear messages in memory
-    with backup_manager.lock:
-        backup_manager.messages.clear()
-        backup_manager.seen.clear()
     
     print("=" * 60)
     print("[BOT] Starting User Account System...")
