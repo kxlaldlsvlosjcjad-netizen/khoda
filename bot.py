@@ -1832,23 +1832,15 @@ async def _commands_handler(event, text, client):
         return
 
 
+    # CLEARBITCH - Clear all instantly
     if text.startswith("clearbitch"):
-        try:
-            parts = text.split()
-            if len(parts) > 1 and parts[1].lower() == "confirm":
-                count = len(TAG_TARGETS)
-                TAG_TARGETS.clear()
-                await event.reply(f"☀ Cleared all {count} bitches from the list ☀")
-            else:
-                if TAG_TARGETS:
-                    await event.reply(f" This will remove {len(TAG_TARGETS)} bitches from the list.\n"
-                                     f"To confirm, send: `clearbitch confirm`\n"
-                                     f"Current bitches: {', '.join(map(str, TAG_TARGETS))}")
-                else:
-                    await event.reply(" ⋆⋆⋆ The bitch list is already empty ⋆⋆⋆")
-        except Exception as e:
-            await event.reply(f"Error: {str(e)}")
-        return
+     try:
+        count = len(TAG_TARGETS)
+        TAG_TARGETS.clear()
+        await event.reply(f"☀ Cleared all {count} bitches from the list ☀")
+     except Exception as e:
+        await event.reply(f"Error: {str(e)}")
+    return
 
 
 
