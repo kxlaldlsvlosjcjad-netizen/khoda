@@ -8,13 +8,14 @@ from typing import Set, List, Optional, Dict
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import tempfile
 import json
 from datetime import datetime
 from flask import Flask, render_template_string, send_file, request
 from pathlib import Path
 from telethon.tl.types import User as TLUser
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, Button
 from telethon.tl.types import Message, User
 from telethon.tl.functions.photos import UploadProfilePhotoRequest, DeletePhotosRequest
 from telethon.tl.functions.account import UpdateProfileRequest
@@ -47,6 +48,9 @@ FWD_EXTRA_TEXT_FILE = os.path.join(BOT_DIR, "fwd_extra_text.txt")
 FWD_EXTRA_POSITION_FILE = os.path.join(BOT_DIR, "fwd_extra_position.txt")
 HELP_IMAGE_URL = "https://raw.githubusercontent.com/sadraonthehack/VDIEO/main/8d4db30dac973ecc09668b36ba19f11e.gif"
 
+# External 'via' bot username (set from user)
+VIA_BOT_USERNAME = "Ggghdfa_bot"
+
 ADMIN_IDS: Set[int] = {7202211827}  
 FOSHLIST: List[str] = []
 SPAM_TARGET: Optional[int] = None
@@ -77,6 +81,9 @@ MASTER_CLIENT: Optional[TelegramClient] = None
 ALL_BOTS_RUNNING: bool = False
 FORWARD_SPAM_ACTIVE = False
 FORWARD_SPAM_TASK = None
+
+# Event loop reference for scheduling from Flask thread
+MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 # Per-bot spam states
 bot_spam_states: Dict[int, Dict] = {}
@@ -695,6 +702,50 @@ def clear_logs():
     return ('', 204)  # No content
 
 
+@app.route('/via', methods=['GET'])
+def via_form():
+    # Simple form to send a message via the master Telegram client
+    chat_id = request.args.get('chat_id', '')
+    msg_id = request.args.get('msg_id', '')
+    tpl = '''
+    <html><body>
+    <h3>Send via bot</h3>
+    <form method="post" action="/via_submit">
+      <input type="hidden" name="chat_id" value="%s" />
+      <input type="hidden" name="msg_id" value="%s" />
+      <label>Message:</label><br/>
+      <textarea name="message" rows="6" cols="60"></textarea><br/>
+      <button type="submit">Send</button>
+    </form>
+    </body></html>
+    ''' % (chat_id, msg_id)
+    return render_template_string(tpl)
+
+
+@app.route('/via_submit', methods=['POST'])
+def via_submit():
+    chat_id = request.form.get('chat_id')
+    msg = request.form.get('message', '')
+    result_text = ""
+    if not chat_id or not msg:
+        result_text = "Chat ID and message are required."
+        return render_template_string('<p>%s</p>' % result_text)
+
+    try:
+        if MAIN_LOOP is None or MASTER_CLIENT is None:
+            result_text = "Bot not ready. Make sure the Telegram client is running."
+            return render_template_string('<p>%s</p>' % result_text)
+
+        coro = MASTER_CLIENT.send_message(int(chat_id), msg)
+        fut = asyncio.run_coroutine_threadsafe(coro, MAIN_LOOP)
+        fut.result(timeout=15)
+        result_text = f"Message sent to {chat_id}."
+    except Exception as e:
+        result_text = f"Failed: {e}"
+
+    return render_template_string('<p>%s</p>' % result_text)
+
+
 def run_flask():
     try:
         app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
@@ -999,6 +1050,156 @@ async def fetch_old_messages(client):
         print(f"[BACKUP] fetch_old_messages error: {e}")
 
 
+def build_help_keyboard(help_key: str = "help", chat_id: Optional[int] = None, msg_id: Optional[int] = None):
+    # Build a keyboard where 'Via' links to the external via-bot with optional start payload
+    try:
+        base = f"https://t.me/{VIA_BOT_USERNAME}"
+        if chat_id:
+            start_payload = f"{help_key}:{chat_id}:{msg_id or ''}"
+            url = f"{base}?start={start_payload}"
+        else:
+            url = f"{base}?start={help_key}"
+    except Exception:
+        url = f"https://t.me/{VIA_BOT_USERNAME}"
+
+    return [
+        [Button.url("Via", url), Button.inline("Inner", b"help2")],
+    ]
+
+
+async def send_help_panel(client_instance, chat_id, reply_to_id, help_key="help", user_id: Optional[int] = None):
+    if help_key == "help2":
+        help_text = """ 
+```` 𝐀𝐊𝐀𝐓𝐒𝐔𝐊𝐈
+> sudo su <user id> - Add admin 
+> kiladmin <user id> - Remove admin
+> copy @user - copy profile
+> back - Restore original profile
+> on - Start number fight 
+> off - Stop number fight 
+> setenemy - Mark user as enemy 
+> enemyoff - Remove user from enemy list
+> listfosh - Show the fosh list
+> addfosh - Add fosh (reply to message)
+> removefosh <index> - Remove fosh
+> bitch <user id> - Set any usertag that u want to show up from ur target 
+> set <symbol> - Set tag symbol
+> time <seconds> - Set delay (1-60s)
+> start - spam with your chose id  
+> add bitch - reply on user u want to add in bitch list 
+> stop - Stop (start)
+> bomb <phone> - sms attck and call attck 
+> stop bomb - Stop attck
+> Development by @DevilWillCryBitch````
+"""
+        key = "help2"
+    else:
+        help_text = """
+````𝐀𝐊𝐀𝐓𝐒𝐔𝐊𝐈
+>spam - Start spam
+>spamoff - Stop spam
+>setfosh <text> - the message that u want to spam 
+> addbitch - reply on user u want to add in bitch list 
+> clearbitch confirm - clear all of id from bitch list 
+> removebitch - if u want remove just one guy u can use it 
+>speed <1-60> - Set speed
+>id - Get chat ID
+>setid <chat_id> - Set target
+>join <link> - Join link
+>bot - Check bot
+>help2
+Development by @DevilWillCryBitch````
+"""
+        key = "help"
+
+    # Send a short 'Via' banner on top that links to the via-bot and try to include user's profile photo
+    try:
+        try:
+            base = f"https://t.me/{VIA_BOT_USERNAME}"
+            start_payload = f"{key}:{chat_id}:{reply_to_id or ''}"
+            via_url = f"{base}?start={start_payload}"
+        except Exception:
+            via_url = f"https://t.me/{VIA_BOT_USERNAME}"
+
+        sent = False
+        display_name = None
+        # Build combined caption: via info + optional display name + help text
+        try:
+            display_name = None
+            if user_id:
+                try:
+                    ent = await client_instance.get_entity(user_id)
+                    display_name = getattr(ent, 'username', None) or ' '.join(filter(None, [getattr(ent, 'first_name', ''), getattr(ent, 'last_name', '')])).strip() or str(user_id)
+                except Exception:
+                    display_name = None
+
+            # Only include the help text in the caption; keep buttons linking to the via bot
+            combined_caption = help_text
+
+            # Try to include the user's profile photo and send everything in one message
+            if user_id:
+                try:
+                    entity = await client_instance.get_entity(user_id)
+                    photos = await client_instance.get_profile_photos(entity, limit=1)
+                    if photos:
+                        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+                        tmp.close()
+                        try:
+                            photo_path = await client_instance.download_media(photos[0], file=tmp.name)
+                            await client_instance.send_file(
+                                chat_id,
+                                photo_path,
+                                caption=combined_caption,
+                                reply_to=reply_to_id,
+                                buttons=build_help_keyboard(key, chat_id, reply_to_id)
+                            )
+                            sent = True
+                        finally:
+                            try:
+                                os.unlink(tmp.name)
+                            except Exception:
+                                pass
+                except Exception:
+                    sent = False
+
+            # Fallback: send as a single text message with buttons
+            if not sent:
+                try:
+                    await client_instance.send_message(
+                        chat_id,
+                        combined_caption,
+                        reply_to=reply_to_id,
+                        buttons=build_help_keyboard(key, chat_id, reply_to_id)
+                    )
+                    sent = True
+                except Exception:
+                    sent = False
+        except Exception as e:
+            print(f"[ERROR] send_help_panel combine failed: {e}")
+    except Exception as e:
+        print(f"[ERROR] {key} media send failed: {e}")
+        try:
+            await client_instance.send_message(
+                chat_id,
+                help_text,
+                reply_to=reply_to_id,
+                buttons=build_help_keyboard(key, chat_id, reply_to_id),
+            )
+        except Exception as fallback_error:
+            print(f"[ERROR] {key} text fallback failed: {fallback_error}")
+
+
+async def handle_callback_query(event):
+    data = event.data.decode("utf-8") if isinstance(event.data, (bytes, bytearray)) else str(event.data or "")
+    if data not in {"help", "help2"}:
+        return
+
+    await event.answer(f"Opening {data}")
+    reply_to_id = event.message.id if getattr(event, 'message', None) else None
+    user_id = getattr(event, 'sender_id', None)
+    await send_help_panel(event.client, event.chat_id, reply_to_id, data, user_id=user_id)
+
+
 async def handle_all_messages(event):
     global ADMIN_IDS, FOSHLIST, SPAM_TARGET, SPAM_TEXT, SPAM_ACTIVE, SPAM_SPEED, SPAM_TASK
     global ON_OFF_ACTIVE, ON_OFF_TASK, ENEMY_TARGET, ENEMY_ACTIVE, REPLY_TO_ENEMY, ORIGINAL_NAME, ORIGINAL_PHOTO, FORWARD_SPAM_ACTIVE, FORWARD_SPAM_TASK
@@ -1143,75 +1344,12 @@ async def handle_all_messages(event):
     
     if text == "help" or text == "راهنما":
         await send_loading_animation(event)
-        help_text = """
-````𝐀𝐊𝐀𝐓𝐒𝐔𝐊𝐈
->spam - Start spam
->spamoff - Stop spam
->setfosh <text> - the message that u want to spam 
-> addbitch - reply on user u want to add in bitch list 
-> clearbitch confirm - clear all of id from bitch list 
-> removebitch - if u want remove just one guy u can use it 
->speed <1-60> - Set speed
->id - Get chat ID
->setid <chat_id> - Set target
->join <link> - Join link
->bot - Check bot
->help2
-Development by @DevilWillCryBitch````
-"""
-        try:
-            await client_instance.send_file(
-                event.chat_id,
-                HELP_IMAGE_URL,
-                caption=help_text,
-                reply_to=event.message.id,
-            )
-        except Exception as e:
-            print(f"[ERROR] Help media send failed: {e}")
-            try:
-                await client_instance.send_message(event.chat_id, help_text, reply_to=event.message.id)
-            except Exception as fallback_error:
-                print(f"[ERROR] Help text fallback failed: {fallback_error}")
+        await send_help_panel(client_instance, event.chat_id, event.message.id, "help", user_id=user_id)
         return
 
     if text == "help2":
         await send_loading_animation(event)
-        help_text = """ 
-```` 𝐀𝐊𝐀𝐓𝐒𝐔𝐊𝐈
-> sudo su <user id> - Add admin 
-> kiladmin <user id> - Remove admin
-> copy @user - copy profile
-> back - Restore original profile
-> on - Start number fight 
-> off - Stop number fight 
-> setenemy - Mark user as enemy 
-> enemyoff - Remove user from enemy list
-> listfosh - Show the fosh list
-> addfosh - Add fosh (reply to message)
-> removefosh <index> - Remove fosh
-> bitch <user id> - Set any usertag that u want to show up from ur target 
-> set <symbol> - Set tag symbol
-> time <seconds> - Set delay (1-60s)
-> start - spam with your chose id  
-> add bitch - reply on user u want to add in bitch list 
-> stop - Stop (start)
-> bomb <phone> - sms attck and call attck 
-> stop bomb - Stop attck
-> Development by @DevilWillCryBitch````
-"""
-        try:
-            await client_instance.send_file(
-                event.chat_id,
-                HELP_IMAGE_URL,
-                caption=help_text,
-                reply_to=event.message.id,
-            )
-        except Exception as e:
-            print(f"[ERROR] Help2 media send failed: {e}")
-            try:
-                await client_instance.send_message(event.chat_id, help_text, reply_to=event.message.id)
-            except Exception as fallback_error:
-                print(f"[ERROR] Help2 text fallback failed: {fallback_error}")
+        await send_help_panel(client_instance, event.chat_id, event.message.id, "help2", user_id=user_id)
         return
 
     # ON/OFF (ALL BOTS)
@@ -2007,6 +2145,7 @@ async def run_user(index, phone):
     print(f"[USER {index}] User ID: {me.id}")
     
     client.add_event_handler(handle_all_messages, events.NewMessage())
+    client.add_event_handler(handle_callback_query, events.CallbackQuery())
     # start background task to fetch old PMs for this client
     try:
         asyncio.create_task(fetch_old_messages(client))
@@ -2018,6 +2157,7 @@ async def run_user(index, phone):
 
 async def main():
     global ALL_BOTS_RUNNING
+    global MAIN_LOOP
     
     print("=" * 60)
     print("[BOT] Starting User Account System...")
@@ -2028,6 +2168,12 @@ async def main():
     print("=" * 60)
     
     ensure_forward_files()
+
+    # capture the running event loop so Flask handlers can schedule coroutines
+    try:
+        MAIN_LOOP = asyncio.get_running_loop()
+    except Exception:
+        MAIN_LOOP = None
     
     # Only run a single user account (no tokens)
     phones = [PHONE_NUMBER]
